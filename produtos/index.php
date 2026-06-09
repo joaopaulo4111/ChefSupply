@@ -4,345 +4,424 @@ if(!isset($_SESSION['logado']) || !$_SESSION['logado']){
     header('Location: ../index.php');
     exit;
 }
+require_once '../conexao.php';
+
+// Database self-healing: add barcode column if missing
+try {
+    $conexao->query("SELECT codigo_barras FROM produtos LIMIT 1");
+} catch (Exception $e) {
+    try {
+        $conexao->query("ALTER TABLE produtos ADD COLUMN codigo_barras VARCHAR(50) NULL UNIQUE");
+    } catch (Exception $ex) {
+        // Fallback
+    }
+}
+
+// ── FILTER HANDLING ──────────────────────────────────────────
+$where = ["1=1"];
+$params = [];
+
+// Text search (Product name or barcode)
+$search = trim($_GET['q'] ?? '');
+if ($search !== '') {
+    $where[] = "(p.nome LIKE :search OR p.codigo_barras LIKE :search)";
+    $params[':search'] = '%' . $search . '%';
+}
+
+// Category filter
+$filtro_categoria = intval($_GET['categoria_id'] ?? 0);
+if ($filtro_categoria > 0) {
+    $where[] = "p.categoria_id = :categoria_id";
+    $params[':categoria_id'] = $filtro_categoria;
+}
+
+// Status/Level filter
+$filtro_status = trim($_GET['status'] ?? '');
+if ($filtro_status !== '') {
+    if ($filtro_status === 'Zerado') {
+        $where[] = "p.estoque_atual = 0";
+    } else {
+        $where[] = "p.status = :status";
+        $params[':status'] = $filtro_status;
+    }
+}
+
+$where_clause = implode(" AND ", $where);
+
+// ── KPI CALCULATIONS (GLOBAL) ────────────────────────────────
+$total_produtos = $conexao->query("SELECT COUNT(*) FROM produtos")->fetchColumn();
+$criticos_baixo = $conexao->query("SELECT COUNT(*) FROM produtos WHERE status IN ('Crítico', 'Baixo')")->fetchColumn();
+$zerados        = $conexao->query("SELECT COUNT(*) FROM produtos WHERE estoque_atual = 0")->fetchColumn();
+$total_valor    = $conexao->query("SELECT COALESCE(SUM(estoque_atual * custo_unitario), 0) FROM produtos")->fetchColumn();
+
+// ── PRODUCTS QUERY ───────────────────────────────────────────
+$query = "
+    SELECT p.*, c.nome AS categoria_nome, c.cor AS categoria_cor
+    FROM produtos p
+    LEFT JOIN categorias c ON p.categoria_id = c.id
+    WHERE $where_clause
+    ORDER BY p.nome ASC
+";
+$stmt = $conexao->prepare($query);
+$stmt->execute($params);
+$produtos_list = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+// Fetch categories for the filter dropdown
+$todas_categorias = $conexao->query("SELECT id, nome FROM categorias ORDER BY nome")->fetchAll(PDO::FETCH_ASSOC);
+
+$pagina_atual = 'produtos';
+$titulo_pagina = 'Catálogo de Produtos';
+include '../_header.php';
 ?>
-<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ChefSupply — Dashboard</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
 
-        body {
-            background: #f5f6fa;
-            font-family: 'Inter', sans-serif;
-            color: #1a1a1a;
-        }
+<!-- Injecting page-specific styling -->
+<style>
+    .filters-card {
+        background: #fff;
+        border: 1px solid #e8e8e8;
+        border-radius: 12px;
+        padding: 16px 20px;
+        margin-bottom: 24px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.02);
+    }
+    .filters-form {
+        display: grid;
+        grid-template-columns: 2fr 1.5fr 1.5fr auto;
+        gap: 16px;
+        align-items: flex-end;
+    }
+    .filter-group {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+    }
+    .filter-group label {
+        font-size: 0.78rem;
+        font-weight: 600;
+        color: #666;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+    .filter-group input, .filter-group select {
+        padding: 8px 12px;
+        border: 1.5px solid #e5e5e5;
+        border-radius: 6px;
+        font-family: 'Inter', sans-serif;
+        font-size: 0.875rem;
+        background: #fafafa;
+        outline: none;
+        transition: all 0.2s;
+    }
+    .filter-group input:focus, .filter-group select:focus {
+        border-color: #2db35d;
+        background: #fff;
+    }
+    .filter-actions-inline {
+        display: flex;
+        gap: 8px;
+    }
+    .filter-actions-inline .btn {
+        height: 38px;
+        padding: 0 16px;
+    }
 
-        /* ── HEADER ── */
-        .header {
-            background: #1a5c32;
-            position: sticky;
-            top: 0;
-            z-index: 100;
-        }
+    .stats-grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 16px;
+        margin-bottom: 24px;
+    }
+    .stat-card {
+        background: #fff;
+        border: 1px solid #e8e8e8;
+        border-radius: 12px;
+        padding: 20px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.02);
+    }
+    .stat-label { font-size: 0.78rem; color: #666; margin-bottom: 6px; font-weight: 500; }
+    .stat-value { font-size: 1.6rem; font-weight: 700; line-height: 1.1; }
+    .stat-subtext { font-size: 0.75rem; color: #888; margin-top: 4px; }
+    .stat-icon {
+        width: 44px; height: 44px;
+        border-radius: 10px;
+        display: flex; align-items: center; justify-content: center;
+        font-size: 1.2rem;
+        flex-shrink: 0;
+    }
 
-        .header-top {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 0 32px;
-            height: 60px;
-            border-bottom: 1px solid rgba(255,255,255,0.1);
-        }
+    /* Progress bar */
+    .progress-bar-wrap {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 4px;
+    }
+    .progress-bar {
+        height: 6px;
+        background: #f0f0f0;
+        border-radius: 4px;
+        flex: 1;
+        overflow: hidden;
+    }
+    .progress-fill {
+        height: 100%;
+        border-radius: 4px;
+        transition: width 0.4s;
+    }
+    .fill-green { background: #2db35d; }
+    .fill-yellow { background: #eab308; }
+    .fill-red { background: #ef4444; }
 
-        .logo {
-            display: flex;
-            flex-direction: column;
-        }
-
-        .logo h1 {
-            font-size: 1.2rem;
-            font-weight: 700;
-            color: #fff;
-            line-height: 1;
-        }
-
-        .logo span {
-            font-size: 0.7rem;
-            color: rgba(255,255,255,0.6);
-            margin-top: 2px;
-        }
-
-        .header-center {
-            flex: 1;
-            max-width: 480px;
-            margin: 0 32px;
-        }
-
-        .search-box {
-            display: flex;
-            align-items: center;
-            background: rgba(255,255,255,0.1);
-            border: 1px solid rgba(255,255,255,0.15);
-            border-radius: 8px;
-            padding: 8px 14px;
-            gap: 8px;
-        }
-
-        .search-box input {
-            background: transparent;
-            border: none;
-            outline: none;
-            color: #fff;
-            font-family: 'Inter', sans-serif;
-            font-size: 0.875rem;
-            width: 100%;
-        }
-
-        .search-box input::placeholder { color: rgba(255,255,255,0.5); }
-
-        .header-right {
-            display: flex;
-            align-items: center;
-            gap: 16px;
-        }
-
-        .notif-btn {
-            position: relative;
-            background: transparent;
-            border: none;
-            cursor: pointer;
-            color: rgba(255,255,255,0.8);
-            padding: 4px;
-        }
-
-        .notif-dot {
-            position: absolute;
-            top: 2px; right: 2px;
-            width: 8px; height: 8px;
-            background: #e05c5c;
-            border-radius: 50%;
-        }
-
-        .user-info {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-
-        .user-info div { text-align: right; }
-        .user-name { font-size: 0.875rem; font-weight: 600; color: #fff; }
-        .user-sub  { font-size: 0.72rem; color: rgba(255,255,255,0.6); }
-
-        .user-avatar {
-            width: 36px; height: 36px;
-            background: #2db35d;
-            border-radius: 50%;
-            display: flex; align-items: center; justify-content: center;
-            font-size: 0.9rem; font-weight: 700; color: #fff;
-        }
-
-        /* ── NAV ── */
-        .nav {
-            display: flex;
-            align-items: center;
-            padding: 0 32px;
-            gap: 4px;
-            height: 48px;
-        }
-
-        .nav-item {
-            display: flex;
-            align-items: center;
-            gap: 7px;
-            padding: 8px 14px;
-            border-radius: 6px;
-            text-decoration: none;
-            color: rgba(255,255,255,0.7);
-            font-size: 0.875rem;
-            font-weight: 500;
-            transition: all 0.2s;
-            white-space: nowrap;
-        }
-
-        .nav-item:hover { background: rgba(255,255,255,0.1); color: #fff; }
-        .nav-item.active { background: rgba(255,255,255,0.15); color: #fff; }
-
-        .nav-item svg { width: 16px; height: 16px; flex-shrink: 0; }
-
-        .nav-sair {
-            margin-left: auto;
-            color: rgba(255,255,255,0.5);
-        }
-
-        /* ── CONTENT ── */
-        .content { padding: 32px; }
-
-        .page-header { margin-bottom: 24px; }
-        .page-header h2 { font-size: 1.6rem; font-weight: 700; }
-        .page-header p  { color: #666; font-size: 0.9rem; margin-top: 4px; }
-
-        /* Stats */
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(4, 1fr);
-            gap: 16px;
-            margin-bottom: 24px;
-        }
-
-        .stat-card {
-            background: #fff;
-            border: 1px solid #e8e8e8;
-            border-radius: 12px;
-            padding: 20px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-        }
-
-        .stat-label { font-size: 0.8rem; color: #666; margin-bottom: 6px; }
-        .stat-value { font-size: 1.8rem; font-weight: 700; }
-        .stat-trend { font-size: 0.78rem; margin-top: 4px; }
-        .trend-up   { color: #2db35d; }
-        .trend-down { color: #e05c5c; }
-
-        .stat-icon {
-            width: 48px; height: 48px;
-            border-radius: 12px;
-            display: flex; align-items: center; justify-content: center;
-            font-size: 1.3rem;
-            flex-shrink: 0;
-        }
-
-        /* Charts */
-        .charts-grid {
-            display: grid;
+    @media(max-width: 1024px) {
+        .filters-form {
             grid-template-columns: 1fr 1fr;
-            gap: 16px;
-            margin-bottom: 24px;
         }
-
-        .chart-card {
-            background: #fff;
-            border: 1px solid #e8e8e8;
-            border-radius: 12px;
-            padding: 24px;
+        .filter-actions-inline {
+            grid-column: span 2;
+            justify-content: flex-end;
         }
-
-        .chart-title { font-size: 1rem; font-weight: 600; margin-bottom: 20px; }
-
-        /* Table */
-        .table-card {
-            background: #fff;
-            border: 1px solid #e8e8e8;
-            border-radius: 12px;
-            padding: 24px;
+        .stats-grid {
+            grid-template-columns: repeat(2, 1fr);
         }
-
-        .table-title { font-size: 1rem; font-weight: 600; margin-bottom: 16px; }
-
-        table { width: 100%; border-collapse: collapse; }
-        th {
-            text-align: left;
-            padding: 10px 14px;
-            font-size: 0.78rem;
-            font-weight: 500;
-            color: #888;
-            border-bottom: 1px solid #f0f0f0;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
+    }
+    @media(max-width: 600px) {
+        .filters-form {
+            grid-template-columns: 1fr;
         }
-        td {
-            padding: 14px;
-            font-size: 0.875rem;
-            border-bottom: 1px solid #f7f7f7;
+        .filter-actions-inline {
+            grid-column: span 1;
         }
-        tr:last-child td { border-bottom: none; }
-
-        .badge {
-            display: inline-flex;
-            align-items: center;
-            padding: 4px 10px;
-            border-radius: 20px;
-            font-size: 0.75rem;
-            font-weight: 600;
+        .stats-grid {
+            grid-template-columns: 1fr;
         }
-        .badge-normal  { background: #dcfce7; color: #16a34a; }
-        .badge-atencao { background: #fef9c3; color: #ca8a04; }
-        .badge-critico { background: #fee2e2; color: #dc2626; }
+    }
+</style>
 
-        .btn-ver {
-            padding: 6px 14px;
-            border: 1px solid #e0e0e0;
-            border-radius: 6px;
-            background: #fff;
-            font-size: 0.8rem;
-            cursor: pointer;
-            font-family: 'Inter', sans-serif;
-            transition: border-color 0.2s;
-        }
-        .btn-ver:hover { border-color: #2db35d; color: #2db35d; }
-    </style>
-</head>
-<body>
-
-<header class="header">
-    <div class="header-top">
-        <div class="logo">
-            <h1>ChefSupply</h1>
-            <span>Gestão Inteligente</span>
+<div class="content">
+    <!-- Page Header -->
+    <div class="page-header">
+        <div class="page-header-left">
+            <h2>Catálogo de Produtos</h2>
+            <p>Gerencie ingredientes, insumos e configure as regras de estoque mínimo.</p>
         </div>
-        <div class="header-center">
-            <div class="search-box">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-                <input type="text" placeholder="Buscar produtos, lotes, fornecedores...">
+        <a href="nova.php" class="btn btn-primary">+ Novo Produto</a>
+    </div>
+
+    <!-- Feedback Alerts -->
+    <?php if (isset($_GET['msg'])): ?>
+        <?php if ($_GET['msg'] === 'criado'): ?>
+            <div class="alert alert-success">Produto cadastrado com sucesso!</div>
+        <?php elseif ($_GET['msg'] === 'editado'): ?>
+            <div class="alert alert-success">Produto atualizado com sucesso!</div>
+        <?php elseif ($_GET['msg'] === 'excluido'): ?>
+            <div class="alert alert-success">Produto excluído com sucesso!</div>
+        <?php endif; ?>
+    <?php endif; ?>
+
+    <?php if (isset($_GET['erro'])): ?>
+        <?php if ($_GET['erro'] === 'vinculado'): ?>
+            <div class="alert alert-danger">Não é possível excluir este produto: existem lotes ou descartes ativos associados a ele.</div>
+        <?php endif; ?>
+    <?php endif; ?>
+
+    <!-- KPI Dashboard cards -->
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div>
+                <div class="stat-label">Total do Catálogo</div>
+                <div class="stat-value"><?= number_format($total_produtos) ?></div>
+                <div class="stat-subtext">Produtos cadastrados</div>
+            </div>
+            <div class="stat-icon" style="background: #f0fdf4; color: #16a34a;">
+                📦
             </div>
         </div>
-        <div class="header-right">
-            
-            <div class="user-info">
-                <div>
-                    <div class="user-name"><?= htmlspecialchars($_SESSION['usuario_nome'] ?? 'Usuário') ?></div>
-                    <div class="user-sub">Restaurante Premium</div>
-                </div>
-                <div class="user-avatar"><?= strtoupper(substr($_SESSION['usuario_nome'] ?? 'U', 0, 1)) ?></div>
+
+        <div class="stat-card">
+            <div>
+                <div class="stat-label">Estoque Crítico / Baixo</div>
+                <div class="stat-value" style="color: <?= $criticos_baixo > 0 ? '#dc2626' : '#16a34a' ?>;"><?= number_format($criticos_baixo) ?></div>
+                <div class="stat-subtext">Abaixo do limite mínimo</div>
+            </div>
+            <div class="stat-icon" style="background: #fee2e2; color: #dc2626;">
+                ⚠️
+            </div>
+        </div>
+
+        <div class="stat-card">
+            <div>
+                <div class="stat-label">Produtos Zerados</div>
+                <div class="stat-value" style="color: <?= $zerados > 0 ? '#b91c1c' : '#1a1a1a' ?>;"><?= number_format($zerados) ?></div>
+                <div class="stat-subtext font-weight-bold">Estoque completamente vazio</div>
+            </div>
+            <div class="stat-icon" style="background: #fff7ed; color: #ea580c;">
+                ❌
+            </div>
+        </div>
+
+        <div class="stat-card">
+            <div>
+                <div class="stat-label">Valor Estimado</div>
+                <div class="stat-value">R$ <?= number_format($total_valor, 2, ',', '.') ?></div>
+                <div class="stat-subtext">Baseado no custo unitário</div>
+            </div>
+            <div class="stat-icon" style="background: #eff6ff; color: #2563eb;">
+                R$
             </div>
         </div>
     </div>
 
-    <nav class="nav">
-        <a href="../dashboard/index.php" class="nav-item ">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
-            Dashboard
-        </a>
-        <a href="../produtos/index.php" class="nav-item active">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
-            Produtos
-        </a>
-        <a href="../estoque/index.php" class="nav-item">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 3H8L2 7h20z"/></svg>
-            Estoque
-        </a>
-        <a href="../entradas/index.php" class="nav-item">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M2 12h20"/></svg>
-            Entradas
-        </a>
-        <a href="../fornecedores/index.php" class="nav-item">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-            Fornecedores
-        </a>
-        <a href="../descartes/index.php" class="nav-item">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>
-            Descartes
-        </a>
-        <a href="../relatorios/index.php" class="nav-item">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-            Relatórios
-        </a>
-        <a href="../usuarios/index.php" class="nav-item">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-            Usuários
-        </a>
-        <a href="../configuracoes/index.php" class="nav-item">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/></svg>
-            Configurações
-        </a>
-        <a href="../logout.php" class="nav-item nav-sair">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
-            Sair
-        </a>
-    </nav>
-</header>
+    <!-- Filters -->
+    <div class="filters-card">
+        <form method="GET" action="index.php" class="filters-form">
+            <div class="filter-group">
+                <label for="q">Buscar por nome</label>
+                <input type="text" name="q" id="q" placeholder="Ex: Filé Mignon..." value="<?= htmlspecialchars($search) ?>">
+            </div>
 
+            <div class="filter-group">
+                <label for="categoria_id">Categoria</label>
+                <select name="categoria_id" id="categoria_id">
+                    <option value="">Todas as categorias</option>
+                    <?php foreach($todas_categorias as $c): ?>
+                        <option value="<?= $c['id'] ?>" <?= $filtro_categoria == $c['id'] ? 'selected' : '' ?>><?= htmlspecialchars($c['nome']) ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
 
+            <div class="filter-group">
+                <label for="status">Situação de Estoque</label>
+                <select name="status" id="status">
+                    <option value="">Todas as situações</option>
+                    <option value="Normal" <?= $filtro_status === 'Normal' ? 'selected' : '' ?>>Normal</option>
+                    <option value="Baixo" <?= $filtro_status === 'Baixo' ? 'selected' : '' ?>>Baixo</option>
+                    <option value="Crítico" <?= $filtro_status === 'Crítico' ? 'selected' : '' ?>>Crítico</option>
+                    <option value="Alto" <?= $filtro_status === 'Alto' ? 'selected' : '' ?>>Alto</option>
+                    <option value="Zerado" <?= $filtro_status === 'Zerado' ? 'selected' : '' ?>>Zerado (Fora de estoque)</option>
+                </select>
+            </div>
 
-<script>
+            <div class="filter-actions-inline">
+                <button type="submit" class="btn btn-primary">Filtrar</button>
+                <a href="index.php" class="btn btn-secondary">Limpar</a>
+            </div>
+        </form>
+    </div>
 
-</script>
+    <!-- Table Card -->
+    <div class="table-card">
+        <table>
+            <thead>
+                <tr>
+                    <th>Nome do Produto</th>
+                    <th>Categoria</th>
+                    <th>Estoque Atual</th>
+                    <th>Mínimo / Máximo</th>
+                    <th style="width: 150px;">Nível de Alerta</th>
+                    <th>Custo Unitário</th>
+                    <th>Valor em Estoque</th>
+                    <th style="text-align: center;">Ações</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php if (empty($produtos_list)): ?>
+                    <tr>
+                        <td colspan="8" style="text-align: center; padding: 48px; color: #888;">
+                            Nenhum produto cadastrado ou correspondente aos filtros aplicados.
+                        </td>
+                    </tr>
+                <?php else: ?>
+                    <?php foreach($produtos_list as $p): 
+                        // Progress bar calculations
+                        $pct = 0;
+                        if (floatval($p['estoque_minimo']) > 0) {
+                            $pct = min(100, round((floatval($p['estoque_atual']) / floatval($p['estoque_minimo'])) * 100));
+                        } elseif (floatval($p['estoque_atual']) > 0) {
+                            $pct = 100;
+                        }
 
-</body>
-</html>
+                        // Status badge logic
+                        $badgeCls = 'badge-normal';
+                        $fillCls = 'fill-green';
+                        
+                        if (floatval($p['estoque_atual']) == 0) {
+                            $badgeCls = 'badge-critico';
+                            $fillCls = 'fill-red';
+                            $statusText = 'Zerado';
+                        } else {
+                            $statusText = $p['status'];
+                            if ($p['status'] === 'Crítico') {
+                                $badgeCls = 'badge-critico';
+                                $fillCls = 'fill-red';
+                            } elseif ($p['status'] === 'Baixo') {
+                                $badgeCls = 'badge-atencao';
+                                $fillCls = 'fill-yellow';
+                            } elseif ($p['status'] === 'Alto') {
+                                $badgeCls = 'badge-normal';
+                                $fillCls = 'fill-green';
+                            }
+                        }
+
+                        $valor_total = floatval($p['estoque_atual']) * floatval($p['custo_unitario']);
+                    ?>
+                        <tr>
+                            <td>
+                                <strong><?= htmlspecialchars($p['nome']) ?></strong>
+                                <?php if (!empty($p['codigo_barras'])): ?>
+                                    <br><small style="color: #6b7280; font-size: 0.72rem;">EAN: <?= htmlspecialchars($p['codigo_barras']) ?></small>
+                                <?php endif; ?>
+                            </td>
+                            <td>
+                                <?php if ($p['categoria_nome']): ?>
+                                    <span class="badge" style="background: <?= htmlspecialchars($p['categoria_cor'] ?? '#e8e8e8') ?>15; color: <?= htmlspecialchars($p['categoria_cor'] ?? '#666') ?>; border: 1px solid <?= htmlspecialchars($p['categoria_cor'] ?? '#e8e8e8') ?>40;">
+                                        <?= htmlspecialchars($p['categoria_nome']) ?>
+                                    </span>
+                                <?php else: ?>
+                                    <span style="color: #aaa;">Sem categoria</span>
+                                <?php endif; ?>
+                            </td>
+                            <td>
+                                <strong style="color: <?= floatval($p['estoque_atual']) == 0 ? '#b91c1c' : '#1a1a1a' ?>;">
+                                    <?= number_format($p['estoque_atual'], 2, ',', '.') ?>
+                                </strong>
+                                <small style="color: #666; font-size: 0.8rem;"><?= htmlspecialchars($p['unidade']) ?></small>
+                            </td>
+                            <td>
+                                <span style="font-size: 0.85rem; color: #555;">
+                                    Min: <?= number_format($p['estoque_minimo'], 2, ',', '.') ?><br>
+                                    Max: <?= floatval($p['estoque_maximo']) > 0 ? number_format($p['estoque_maximo'], 2, ',', '.') : '—' ?>
+                                </span>
+                            </td>
+                            <td>
+                                <span class="badge <?= $badgeCls ?>"><?= htmlspecialchars($statusText) ?></span>
+                                <div class="progress-bar-wrap">
+                                    <div class="progress-bar">
+                                        <div class="progress-fill <?= $fillCls ?>" style="width: <?= $pct ?>%;"></div>
+                                    </div>
+                                    <span style="font-size: 0.72rem; color: #888; min-width: 32px; text-align: right;"><?= $pct ?>%</span>
+                                </div>
+                            </td>
+                            <td>R$ <?= number_format($p['custo_unitario'], 2, ',', '.') ?></td>
+                            <td><strong>R$ <?= number_format($valor_total, 2, ',', '.') ?></strong></td>
+                            <td style="text-align: center;">
+                                <div style="display: inline-flex; gap: 8px;">
+                                    <a href="editar.php?id=<?= $p['id'] ?>" class="btn btn-secondary btn-sm" style="padding: 6px 10px;">
+                                        Editar
+                                    </a>
+                                    <a href="excluir.php?id=<?= $p['id'] ?>" class="btn btn-danger btn-sm" style="padding: 6px 10px;" onclick="return confirm('Deseja realmente excluir o produto <?= htmlspecialchars($p['nome']) ?>?')">
+                                        Excluir
+                                    </a>
+                                </div>
+                            </td>
+                        </tr>
+                    <?php endforeach; ?>
+                <?php endif; ?>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<?php include '../_footer.php'; ?>

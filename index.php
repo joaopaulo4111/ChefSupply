@@ -273,7 +273,7 @@
                 <button type="submit" class="btn-primary">Entrar no Sistema</button>
             </form>
 
-            
+
 
 
         </div>
@@ -293,6 +293,26 @@
                     <label>Senha</label>
                     <input type="password" name="senha" placeholder="••••••••">
                 </div>
+
+                <?php if (isset($_GET['erro']) && in_array($_GET['erro'], ['2', '3', '4', '5'])): ?>
+                    <?php
+                    $msgs = [
+                        '2' => 'E-mail já cadastrado.',
+                        '3' => 'Todos os campos são obrigatórios.',
+                        '4' => 'E-mail inválido.',
+                        '5' => 'A senha deve ter no mínimo 6 caracteres.'
+                    ];
+                    ?>
+                    <div
+                        style="background:#fee2e2;border:1px solid #fca5a5;border-radius:8px;padding:10px 14px;margin-bottom:14px;display:flex;align-items:center;gap:8px;font-size:0.85rem;color:#dc2626;">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="12" r="10" />
+                            <line x1="12" y1="8" x2="12" y2="12" />
+                            <line x1="12" y1="16" x2="12.01" y2="16" />
+                        </svg>
+                        <?= $msgs[$_GET['erro']] ?? 'Erro ao criar conta.' ?>
+                    </div>
+                <?php endif; ?>
                 <button type="submit" class="btn-primary">Criar Conta</button>
             </form>
         </div>
@@ -311,6 +331,9 @@
                 t.classList.toggle('active', (aba === 'entrar' && i === 0) || (aba === 'criar' && i === 1));
             });
         }
+        <?php if (isset($_GET['erro']) && in_array($_GET['erro'], ['2', '3', '4', '5'])): ?>
+                trocarAba('criar');
+<?php endif; ?>
     </script>
 
 </body>

@@ -2,7 +2,7 @@
 $host = "127.0.0.1";
 $user = "root";
 $porta = "3306";
-$password = "Dev@12345";
+$password = "ceub123456";
 $db = "chefsupply";
 
 

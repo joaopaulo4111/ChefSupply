@@ -4,345 +4,382 @@ if(!isset($_SESSION['logado']) || !$_SESSION['logado']){
     header('Location: ../index.php');
     exit;
 }
+require_once '../conexao.php';
+
+// ── FILTER HANDLING ──────────────────────────────────────────
+$where = ["1=1"];
+$params = [];
+
+// Text search (Product name, batch code)
+$search = trim($_GET['q'] ?? '');
+if ($search !== '') {
+    $where[] = "(p.nome LIKE :search OR l.codigo_lote LIKE :search)";
+    $params[':search'] = '%' . $search . '%';
+}
+
+// Supplier filter
+$filtro_fornecedor = intval($_GET['fornecedor_id'] ?? 0);
+if ($filtro_fornecedor > 0) {
+    $where[] = "l.fornecedor_id = :fornecedor_id";
+    $params[':fornecedor_id'] = $filtro_fornecedor;
+}
+
+// Start Date
+$filtro_inicio = trim($_GET['data_inicio'] ?? '');
+if ($filtro_inicio !== '') {
+    $where[] = "l.data_entrada >= :data_inicio";
+    $params[':data_inicio'] = $filtro_inicio;
+}
+
+// End Date
+$filtro_fim = trim($_GET['data_fim'] ?? '');
+if ($filtro_fim !== '') {
+    $where[] = "l.data_entrada <= :data_fim";
+    $params[':data_fim'] = $filtro_fim;
+}
+
+$where_clause = implode(" AND ", $where);
+
+// ── KPI CALCULATIONS ─────────────────────────────────────────
+$stmtTotal = $conexao->prepare("
+    SELECT COALESCE(SUM(l.preco_custo * l.quantidade), 0) 
+    FROM lotes l
+    JOIN produtos p ON l.produto_id = p.id
+    WHERE $where_clause
+");
+$stmtTotal->execute($params);
+$total_compra = $stmtTotal->fetchColumn();
+
+$stmtCount = $conexao->prepare("
+    SELECT COUNT(*) 
+    FROM lotes l
+    JOIN produtos p ON l.produto_id = p.id
+    WHERE $where_clause
+");
+$stmtCount->execute($params);
+$total_operacoes = $stmtCount->fetchColumn();
+
+$stmtVol = $conexao->prepare("
+    SELECT COALESCE(SUM(l.quantidade), 0) 
+    FROM lotes l
+    JOIN produtos p ON l.produto_id = p.id
+    WHERE $where_clause
+");
+$stmtVol->execute($params);
+$total_volume = $stmtVol->fetchColumn();
+
+$custo_medio = $total_operacoes > 0 ? $total_compra / $total_operacoes : 0;
+
+// ── ENTRIES HISTORY QUERY ────────────────────────────────────
+$query = "
+    SELECT l.*, p.nome AS produto_nome, p.unidade AS produto_unidade,
+           f.nome AS fornecedor_nome, u.nome AS usuario_nome
+    FROM lotes l
+    JOIN produtos p ON l.produto_id = p.id
+    LEFT JOIN fornecedores f ON l.fornecedor_id = f.id
+    LEFT JOIN usuarios u ON l.usuario_id = u.id
+    WHERE $where_clause
+    ORDER BY l.data_entrada DESC, l.id DESC
+";
+$stmt = $conexao->prepare($query);
+$stmt->execute($params);
+$entradas_list = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+// Fetch suppliers for filter dropdown
+$todos_fornecedores = $conexao->query("SELECT id, nome FROM fornecedores ORDER BY nome")->fetchAll(PDO::FETCH_ASSOC);
+
+$pagina_atual = 'entradas';
+$titulo_pagina = 'Histórico de Entradas';
+include '../_header.php';
 ?>
-<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ChefSupply — Dashboard</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
 
-        body {
-            background: #f5f6fa;
-            font-family: 'Inter', sans-serif;
-            color: #1a1a1a;
-        }
+<!-- Injecting page-specific styling -->
+<style>
+    .filters-card {
+        background: #fff;
+        border: 1px solid #e8e8e8;
+        border-radius: 12px;
+        padding: 16px 20px;
+        margin-bottom: 24px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.02);
+    }
+    .filters-form {
+        display: grid;
+        grid-template-columns: 1.8fr 1.5fr 1fr 1fr auto;
+        gap: 16px;
+        align-items: flex-end;
+    }
+    .filter-group {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+    }
+    .filter-group label {
+        font-size: 0.78rem;
+        font-weight: 600;
+        color: #666;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+    .filter-group input, .filter-group select {
+        padding: 8px 12px;
+        border: 1.5px solid #e5e5e5;
+        border-radius: 6px;
+        font-family: 'Inter', sans-serif;
+        font-size: 0.875rem;
+        background: #fafafa;
+        outline: none;
+        transition: all 0.2s;
+    }
+    .filter-group input:focus, .filter-group select:focus {
+        border-color: #2db35d;
+        background: #fff;
+    }
+    .filter-actions-inline {
+        display: flex;
+        gap: 8px;
+    }
+    .filter-actions-inline .btn {
+        height: 38px;
+        padding: 0 16px;
+    }
 
-        /* ── HEADER ── */
-        .header {
-            background: #1a5c32;
-            position: sticky;
-            top: 0;
-            z-index: 100;
-        }
+    .stats-grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 16px;
+        margin-bottom: 24px;
+    }
+    .stat-card {
+        background: #fff;
+        border: 1px solid #e8e8e8;
+        border-radius: 12px;
+        padding: 20px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.02);
+    }
+    .stat-label { font-size: 0.78rem; color: #666; margin-bottom: 6px; font-weight: 500; }
+    .stat-value { font-size: 1.6rem; font-weight: 700; line-height: 1.1; }
+    .stat-subtext { font-size: 0.75rem; color: #888; margin-top: 4px; }
+    .stat-icon {
+        width: 44px; height: 44px;
+        border-radius: 10px;
+        display: flex; align-items: center; justify-content: center;
+        font-size: 1.2rem;
+        flex-shrink: 0;
+    }
 
-        .header-top {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 0 32px;
-            height: 60px;
-            border-bottom: 1px solid rgba(255,255,255,0.1);
-        }
-
-        .logo {
-            display: flex;
-            flex-direction: column;
-        }
-
-        .logo h1 {
-            font-size: 1.2rem;
-            font-weight: 700;
-            color: #fff;
-            line-height: 1;
-        }
-
-        .logo span {
-            font-size: 0.7rem;
-            color: rgba(255,255,255,0.6);
-            margin-top: 2px;
-        }
-
-        .header-center {
-            flex: 1;
-            max-width: 480px;
-            margin: 0 32px;
-        }
-
-        .search-box {
-            display: flex;
-            align-items: center;
-            background: rgba(255,255,255,0.1);
-            border: 1px solid rgba(255,255,255,0.15);
-            border-radius: 8px;
-            padding: 8px 14px;
-            gap: 8px;
-        }
-
-        .search-box input {
-            background: transparent;
-            border: none;
-            outline: none;
-            color: #fff;
-            font-family: 'Inter', sans-serif;
-            font-size: 0.875rem;
-            width: 100%;
-        }
-
-        .search-box input::placeholder { color: rgba(255,255,255,0.5); }
-
-        .header-right {
-            display: flex;
-            align-items: center;
-            gap: 16px;
-        }
-
-        .notif-btn {
-            position: relative;
-            background: transparent;
-            border: none;
-            cursor: pointer;
-            color: rgba(255,255,255,0.8);
-            padding: 4px;
-        }
-
-        .notif-dot {
-            position: absolute;
-            top: 2px; right: 2px;
-            width: 8px; height: 8px;
-            background: #e05c5c;
-            border-radius: 50%;
-        }
-
-        .user-info {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-
-        .user-info div { text-align: right; }
-        .user-name { font-size: 0.875rem; font-weight: 600; color: #fff; }
-        .user-sub  { font-size: 0.72rem; color: rgba(255,255,255,0.6); }
-
-        .user-avatar {
-            width: 36px; height: 36px;
-            background: #2db35d;
-            border-radius: 50%;
-            display: flex; align-items: center; justify-content: center;
-            font-size: 0.9rem; font-weight: 700; color: #fff;
-        }
-
-        /* ── NAV ── */
-        .nav {
-            display: flex;
-            align-items: center;
-            padding: 0 32px;
-            gap: 4px;
-            height: 48px;
-        }
-
-        .nav-item {
-            display: flex;
-            align-items: center;
-            gap: 7px;
-            padding: 8px 14px;
-            border-radius: 6px;
-            text-decoration: none;
-            color: rgba(255,255,255,0.7);
-            font-size: 0.875rem;
-            font-weight: 500;
-            transition: all 0.2s;
-            white-space: nowrap;
-        }
-
-        .nav-item:hover { background: rgba(255,255,255,0.1); color: #fff; }
-        .nav-item.active { background: rgba(255,255,255,0.15); color: #fff; }
-
-        .nav-item svg { width: 16px; height: 16px; flex-shrink: 0; }
-
-        .nav-sair {
-            margin-left: auto;
-            color: rgba(255,255,255,0.5);
-        }
-
-        /* ── CONTENT ── */
-        .content { padding: 32px; }
-
-        .page-header { margin-bottom: 24px; }
-        .page-header h2 { font-size: 1.6rem; font-weight: 700; }
-        .page-header p  { color: #666; font-size: 0.9rem; margin-top: 4px; }
-
-        /* Stats */
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(4, 1fr);
-            gap: 16px;
-            margin-bottom: 24px;
-        }
-
-        .stat-card {
-            background: #fff;
-            border: 1px solid #e8e8e8;
-            border-radius: 12px;
-            padding: 20px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-        }
-
-        .stat-label { font-size: 0.8rem; color: #666; margin-bottom: 6px; }
-        .stat-value { font-size: 1.8rem; font-weight: 700; }
-        .stat-trend { font-size: 0.78rem; margin-top: 4px; }
-        .trend-up   { color: #2db35d; }
-        .trend-down { color: #e05c5c; }
-
-        .stat-icon {
-            width: 48px; height: 48px;
-            border-radius: 12px;
-            display: flex; align-items: center; justify-content: center;
-            font-size: 1.3rem;
-            flex-shrink: 0;
-        }
-
-        /* Charts */
-        .charts-grid {
-            display: grid;
+    @media(max-width: 1024px) {
+        .filters-form {
             grid-template-columns: 1fr 1fr;
-            gap: 16px;
-            margin-bottom: 24px;
         }
-
-        .chart-card {
-            background: #fff;
-            border: 1px solid #e8e8e8;
-            border-radius: 12px;
-            padding: 24px;
+        .filter-actions-inline {
+            grid-column: span 2;
+            justify-content: flex-end;
         }
-
-        .chart-title { font-size: 1rem; font-weight: 600; margin-bottom: 20px; }
-
-        /* Table */
-        .table-card {
-            background: #fff;
-            border: 1px solid #e8e8e8;
-            border-radius: 12px;
-            padding: 24px;
+        .stats-grid {
+            grid-template-columns: repeat(2, 1fr);
         }
-
-        .table-title { font-size: 1rem; font-weight: 600; margin-bottom: 16px; }
-
-        table { width: 100%; border-collapse: collapse; }
-        th {
-            text-align: left;
-            padding: 10px 14px;
-            font-size: 0.78rem;
-            font-weight: 500;
-            color: #888;
-            border-bottom: 1px solid #f0f0f0;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
+    }
+    @media(max-width: 600px) {
+        .filters-form {
+            grid-template-columns: 1fr;
         }
-        td {
-            padding: 14px;
-            font-size: 0.875rem;
-            border-bottom: 1px solid #f7f7f7;
+        .filter-actions-inline {
+            grid-column: span 1;
         }
-        tr:last-child td { border-bottom: none; }
-
-        .badge {
-            display: inline-flex;
-            align-items: center;
-            padding: 4px 10px;
-            border-radius: 20px;
-            font-size: 0.75rem;
-            font-weight: 600;
+        .stats-grid {
+            grid-template-columns: 1fr;
         }
-        .badge-normal  { background: #dcfce7; color: #16a34a; }
-        .badge-atencao { background: #fef9c3; color: #ca8a04; }
-        .badge-critico { background: #fee2e2; color: #dc2626; }
+    }
+</style>
 
-        .btn-ver {
-            padding: 6px 14px;
-            border: 1px solid #e0e0e0;
-            border-radius: 6px;
-            background: #fff;
-            font-size: 0.8rem;
-            cursor: pointer;
-            font-family: 'Inter', sans-serif;
-            transition: border-color 0.2s;
-        }
-        .btn-ver:hover { border-color: #2db35d; color: #2db35d; }
-    </style>
-</head>
-<body>
-
-<header class="header">
-    <div class="header-top">
-        <div class="logo">
-            <h1>ChefSupply</h1>
-            <span>Gestão Inteligente</span>
+<div class="content">
+    <!-- Page Header -->
+    <div class="page-header">
+        <div class="page-header-left">
+            <h2>Histórico de Entradas</h2>
+            <p>Monitore os recebimentos de mercadoria e gerencie o custo de aquisição dos insumos.</p>
         </div>
-        <div class="header-center">
-            <div class="search-box">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-                <input type="text" placeholder="Buscar produtos, lotes, fornecedores...">
+        <a href="nova.php" class="btn btn-primary">+ Registrar Entrada</a>
+    </div>
+
+    <!-- Feedback Alerts -->
+    <?php if (isset($_GET['msg'])): ?>
+        <?php if ($_GET['msg'] === 'criado'): ?>
+            <div class="alert alert-success">Entrada registrada com sucesso! O estoque foi adicionado.</div>
+        <?php elseif ($_GET['msg'] === 'estornado'): ?>
+            <div class="alert alert-success">Entrada estornada com sucesso! As quantidades foram removidas do estoque.</div>
+        <?php endif; ?>
+    <?php endif; ?>
+
+    <?php if (isset($_GET['erro'])): ?>
+        <?php if ($_GET['erro'] === 'nao_encontrado'): ?>
+            <div class="alert alert-danger">O registro de entrada solicitado não foi encontrado.</div>
+        <?php elseif ($_GET['erro'] === 'consumido'): ?>
+            <div class="alert alert-danger">Não é possível estornar esta entrada: partes deste lote já foram consumidas ou descartadas do estoque.</div>
+        <?php elseif ($_GET['erro'] === 'falha_estorno'): ?>
+            <div class="alert alert-danger">Falha ao realizar estorno da entrada. Detalhes: <?= htmlspecialchars($_GET['detalhe'] ?? '') ?></div>
+        <?php endif; ?>
+    <?php endif; ?>
+
+    <!-- KPI Summary Cards -->
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div>
+                <div class="stat-label">Custo Total Recebido</div>
+                <div class="stat-value" style="color: #2db35d;">R$ <?= number_format($total_compra, 2, ',', '.') ?></div>
+                <div class="stat-subtext">Valor total investido</div>
+            </div>
+            <div class="stat-icon" style="background: #eafaf1; color: #2db35d;">
+                R$
             </div>
         </div>
-        <div class="header-right">
-            
-            <div class="user-info">
-                <div>
-                    <div class="user-name"><?= htmlspecialchars($_SESSION['usuario_nome'] ?? 'Usuário') ?></div>
-                    <div class="user-sub">Restaurante Premium</div>
-                </div>
-                <div class="user-avatar"><?= strtoupper(substr($_SESSION['usuario_nome'] ?? 'U', 0, 1)) ?></div>
+
+        <div class="stat-card">
+            <div>
+                <div class="stat-label">Recebimentos</div>
+                <div class="stat-value"><?= number_format($total_operacoes) ?></div>
+                <div class="stat-subtext">Operações de entrada registradas</div>
+            </div>
+            <div class="stat-icon" style="background: #eff6ff; color: #2563eb;">
+                📥
+            </div>
+        </div>
+
+        <div class="stat-card">
+            <div>
+                <div class="stat-label">Custo Médio por Lote</div>
+                <div class="stat-value">R$ <?= number_format($custo_medio, 2, ',', '.') ?></div>
+                <div class="stat-subtext">Valor médio por lote</div>
+            </div>
+            <div class="stat-icon" style="background: #fff7ed; color: #ea580c;">
+                ⚖️
+            </div>
+        </div>
+
+        <div class="stat-card">
+            <div>
+                <div class="stat-label">Volume de Insumos</div>
+                <div class="stat-value"><?= number_format($total_volume, 2, ',', '.') ?></div>
+                <div class="stat-subtext">Quantidade física de entradas</div>
+            </div>
+            <div class="stat-icon" style="background: #fdf2f8; color: #db2777;">
+                🚚
             </div>
         </div>
     </div>
 
-    <nav class="nav">
-        <a href="../dashboard/index.php" class="nav-item ">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
-            Dashboard
-        </a>
-        <a href="../produtos/index.php" class="nav-item ">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
-            Produtos
-        </a>
-        <a href="../estoque/index.php" class="nav-item ">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 3H8L2 7h20z"/></svg>
-            Estoque
-        </a>
-        <a href="../entradas/index.php" class="nav-item active">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M2 12h20"/></svg>
-            Entradas
-        </a>
-        <a href="../fornecedores/index.php" class="nav-item">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-            Fornecedores
-        </a>
-        <a href="../descartes/index.php" class="nav-item">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>
-            Descartes
-        </a>
-        <a href="../relatorios/index.php" class="nav-item">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-            Relatórios
-        </a>
-        <a href="../usuarios/index.php" class="nav-item">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-            Usuários
-        </a>
-        <a href="../configuracoes/index.php" class="nav-item">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/></svg>
-            Configurações
-        </a>
-        <a href="../logout.php" class="nav-item nav-sair">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
-            Sair
-        </a>
-    </nav>
-</header>
+    <!-- Filters and Search -->
+    <div class="filters-card">
+        <form method="GET" action="index.php" class="filters-form">
+            <div class="filter-group">
+                <label for="q">Buscar produto / lote</label>
+                <input type="text" name="q" id="q" placeholder="Nome do produto ou código do lote..." value="<?= htmlspecialchars($search) ?>">
+            </div>
 
+            <div class="filter-group">
+                <label for="fornecedor_id">Fornecedor</label>
+                <select name="fornecedor_id" id="fornecedor_id">
+                    <option value="">Todos os fornecedores</option>
+                    <?php foreach($todos_fornecedores as $tf): ?>
+                        <option value="<?= $tf['id'] ?>" <?= $filtro_fornecedor == $tf['id'] ? 'selected' : '' ?>><?= htmlspecialchars($tf['nome']) ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
 
+            <div class="filter-group">
+                <label for="data_inicio">Entrada De</label>
+                <input type="date" name="data_inicio" id="data_inicio" value="<?= htmlspecialchars($filtro_inicio) ?>">
+            </div>
 
-<script>
+            <div class="filter-group">
+                <label for="data_fim">Até</label>
+                <input type="date" name="data_fim" id="data_fim" value="<?= htmlspecialchars($filtro_fim) ?>">
+            </div>
 
-</script>
+            <div class="filter-actions-inline">
+                <button type="submit" class="btn btn-primary">Filtrar</button>
+                <a href="index.php" class="btn btn-secondary">Limpar</a>
+            </div>
+        </form>
+    </div>
 
-</body>
-</html>
+    <!-- Entries Table -->
+    <div class="table-card">
+        <table>
+            <thead>
+                <tr>
+                    <th>Data</th>
+                    <th>Produto</th>
+                    <th>Identificação / Lote</th>
+                    <th>Fornecedor</th>
+                    <th>Qtd. Recebida</th>
+                    <th>Custo Unit.</th>
+                    <th>Valor Total</th>
+                    <th>Vencimento</th>
+                    <th>Operador</th>
+                    <th style="text-align: center;">Ações</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php if (empty($entradas_list)): ?>
+                    <tr>
+                        <td colspan="10" style="text-align: center; padding: 48px; color: #888;">
+                            Nenhum registro de entrada de mercadoria encontrado para os filtros selecionados.
+                        </td>
+                    </tr>
+                <?php else: ?>
+                    <?php foreach ($entradas_list as $l): 
+                        $valor_operacao = floatval($l['quantidade']) * floatval($l['preco_custo']);
+                    ?>
+                        <tr>
+                            <td><strong><?= date('d/m/Y', strtotime($l['data_entrada'])) ?></strong></td>
+                            <td><strong><?= htmlspecialchars($l['produto_nome']) ?></strong></td>
+                            <td>
+                                <?php if ($l['codigo_lote']): ?>
+                                    <span class="badge" style="background: #e0f2fe; color: #0369a1; border: 1px solid #bae6fd;"><?= htmlspecialchars($l['codigo_lote']) ?></span>
+                                <?php else: ?>
+                                    <span class="badge" style="background: #f3f4f6; color: #4b5563;">#<?= $l['id'] ?></span>
+                                <?php endif; ?>
+                            </td>
+                            <td><?= htmlspecialchars($l['fornecedor_name'] ?? $l['fornecedor_nome'] ?? '—') ?></td>
+                            <td>
+                                <strong><?= number_format($l['quantidade'], 2, ',', '.') ?></strong>
+                                <small style="color: #666;"><?= htmlspecialchars($l['produto_unidade']) ?></small>
+                            </td>
+                            <td>R$ <?= number_format($l['preco_custo'], 2, ',', '.') ?></td>
+                            <td style="color: #16a34a; font-weight: 600;">R$ <?= number_format($valor_operacao, 2, ',', '.') ?></td>
+                            <td>
+                                <?php if ($l['data_vencimento']): 
+                                    $dataVenc = strtotime($l['data_vencimento']);
+                                    $diasRestantes = ceil(($dataVenc - time()) / 86400);
+                                    $vencCls = '';
+                                    if ($diasRestantes < 0) {
+                                        $vencCls = 'color: #dc2626; font-weight: 600;';
+                                    } elseif ($diasRestantes <= 7) {
+                                        $vencCls = 'color: #ca8a04; font-weight: 600;';
+                                    }
+                                ?>
+                                    <span style="<?= $vencCls ?>"><?= date('d/m/Y', $dataVenc) ?></span>
+                                <?php else: ?>
+                                    <span style="color: #aaa;">Não informado</span>
+                                <?php endif; ?>
+                            </td>
+                            <td><?= htmlspecialchars($l['usuario_nome'] ?? '—') ?></td>
+                            <td style="text-align: center;">
+                                <a href="excluir.php?id=<?= $l['id'] ?>" class="btn btn-danger btn-sm" onclick="return confirm('Deseja realmente estornar esta entrada de estoque? O lote correspondente será removido e a quantidade subtraída do estoque.')">
+                                    Estornar
+                                </a>
+                            </td>
+                        </tr>
+                    <?php endforeach; ?>
+                <?php endif; ?>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<?php include '../_footer.php'; ?>

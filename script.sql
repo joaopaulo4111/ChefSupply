@@ -109,4 +109,18 @@ CREATE TABLE configuracoes (
     descricao VARCHAR(255)
 );
 select * from usuarios
+USE chefsupply;
+INSERT INTO categorias (nome) VALUES
+('Carnes'),
+('Laticínios'),
+('Vegetais'),
+('Frutas'),
+('Grãos'),
+('Óleos'),
+('Massas'),
+('Bebidas'),
+('Temperos'),
+('Limpeza');
+
+INSERT INTO categorias (nome) VALUES ('Doces e Açúcar');
 
